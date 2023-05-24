@@ -1,18 +1,21 @@
 from pymavlink import mavutil
 import time
 import sys
+import math
 
 
 class Drone():
     """Class of quadrocopter inizialise"""
 
-    def __init__(self, url, mode):
+    def __init__(self, url):
         """Constructor"""
         self.url = url
         # self.mode = mode
         self.master = mavutil.mavlink_connection(url)
         self.master.wait_heartbeat()
         self.attitude = abs(self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True).to_dict()['z'])
+        self.x_current = self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True).to_dict()['x']
+        self.y_current = self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True).to_dict()['y']
 
     def arming(self, status):
         """Arm/disarm"""
@@ -69,14 +72,25 @@ class Drone():
             # print(x, y)
             time.sleep(0.1)
 
-    def manual_control(self, goal_attitude, linear_x=0, linear_y=0, linear_z=500):
+    def manual_control(self, linear_x=0, linear_y=0, linear_z=500, angular_z=0):
         """manual control of drone"""
         self.master.mav.send(
             mavutil.mavlink.MAVLink_set_position_target_local_ned_message(10, self.master.target_system,
                                                                           self.master.target_component,
                                                                           mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-                                                                          int(0b110111000011), 10, 10,
-                                                                          -goal_attitude, linear_x, linear_y, linear_z, 0, 0, 0, 1.57, 0.5))
+                                                                          int(0b100111000111), 10, 10,
+                                                                          -0, linear_x, linear_y, linear_z,
+                                                                          0, 0, 0, angular_z, 0))
+
+    def get_current_possition(self):
+        self.x_current = round(self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True).to_dict()['x'], 2)
+        self.y_current = round(self.master.recv_match(type='LOCAL_POSITION_NED', blocking=True).to_dict()['y'], 2)
+        return self.x_current, self.y_current
+
+    def keep_attitude(self, attitude):
+        """Keep attitude"""
+        kp = 150
+        return (attitude - self.attitude) * kp
 
     def set_rc_channel_pwm(self, channel_id, pwm=1500):
         """ Set RC channel pwm value
@@ -98,23 +112,58 @@ class Drone():
             *rc_channel_values)  # RC channel list, in microseconds.
 
 
-class Router(x, y, power):
+class Router():
     """Class of router emulated"""
-    def __init__(self):
-        self.x = x
-        self.y = y
+
+    def __init__(self, router_place, power, frequency):
+        """Constructor"""
+        self.x_center = router_place[0]
+        self.y_center = router_place[1]
         self.power = power
+        self.frequency = frequency
+        self.wavelength = 1 / self.frequency
+        self.signal = []
+        print(f'Router was placed in {router_place}')
 
     def transmit(self):
-        
+        """Calculate power of WIFI signal"""
+        try:
+            self.signal = {d: (10 ** 10 * ((self.wavelength / (4 * math.pi * d)) ** 2) * self.power) for d in
+                           range(1, 50)}
+        except ZeroDivisionError:
+            pass
+
+    def power_in_point(self, current_point):
+        """Calculate power of WIFI signal"""
+        x_point, y_point = current_point
+        distance = abs(math.sqrt(((x_point - self.x_center) ** 2) + ((y_point - self.y_center) ** 2)))
+        print(f'd = {distance}')
+        return 10 ** 10 * (self.wavelength / (4 * math.pi * distance)) * self.power
+
+    def angle_to_point(self, current_point):
+        '''Calculate angle to the point'''
+        x_point, y_point = current_point
+        angle = 180 / math.pi * math.atan2(y_point - self.y_center, x_point - self.x_center)
+        return angle
+
 
 drone = Drone(url='udpin:localhost:14551')
+router_place = (10, -45)
+router = Router(router_place, 24, 2.4 * 10 ** 9)
+router.transmit()
+
 drone.arming(True)
 drone.set_mode('GUIDED')
+# print(router.signal)
 goal_attitude = 5
 drone.takeoff(goal_attitude)
 time.sleep(5)
-drone.go_to_point(10, 15)
-drone.manual_control(goal_attitude=goal_attitude, linear_x=750)
-time.sleep(5)
+while True:
+    current_point = drone.get_current_possition()
+    power = - round(1 / router.power_in_point(current_point) * 0.1, 2)
+    angle = router.angle_to_point(current_point)
+    linear_z = drone.keep_attitude(goal_attitude)
+    print(f'linear_x = {power}, linear_z = {linear_z}, angular_z = {angle}, current_point = {current_point}')
+    drone.manual_control(linear_x=power, angular_z=angle, linear_z=0)
+    time.sleep(0.1)
 print('the end')
